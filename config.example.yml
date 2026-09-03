@@ -1,0 +1,6 @@
+url: https://monitoring.example.com
+site: mysite
+username: automation-user
+hosts:
+  - host-a
+  - host-b
