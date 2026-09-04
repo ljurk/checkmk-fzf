@@ -1,0 +1,6 @@
+# Build output
+/checkmk-fzf
+/bin/
+
+# Legacy local credentials (no longer read by the application)
+.env

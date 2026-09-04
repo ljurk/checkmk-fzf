@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,13 +19,14 @@ import (
 )
 
 const (
-	colorReset  = "\x1b[0m"
-	colorRed    = "\x1b[31m"
-	colorGreen  = "\x1b[32m"
-	colorYellow = "\x1b[33m"
+	colorReset   = "\x1b[0m"
+	colorRed     = "\x1b[31m"
+	colorGreen   = "\x1b[32m"
+	colorYellow  = "\x1b[33m"
+	colorMagenta = "\x1b[35m"
 )
 
-var stateNames = map[int]string{0: "ok", 1: "warning", 2: "critical"}
+var stateNames = map[int]string{0: "ok", 1: "warning", 2: "critical", 3: "unknown"}
 
 type service struct {
 	Title       string `json:"title"`
@@ -148,8 +148,8 @@ func newRootCommand(stdin io.Reader, stdout, stderr io.Writer, secrets secretSto
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		Args:          cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return executeTUI(false, false, stdin, stdout, secrets)
 		},
 	}
 	root.SetOut(stdout)
@@ -180,39 +180,18 @@ func newRootCommand(stdin io.Reader, stdout, stderr io.Writer, secrets secretSto
 		},
 	}
 
-	var fzfCrit, fzfMy bool
-	fzfCommand := &cobra.Command{
-		Use:   "fzf",
-		Short: "Browse hosts and service details interactively",
-		Args:  cobra.NoArgs,
+	var tuiCrit, tuiMy bool
+	tuiCommand := &cobra.Command{
+		Use:     "tui",
+		Aliases: []string{"fzf"},
+		Short:   "Browse hosts and service details interactively",
+		Args:    cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return executeFZF(fzfCrit, fzfMy, stderr, secrets)
+			return executeTUI(tuiCrit, tuiMy, stdin, stdout, secrets)
 		},
 	}
-	fzfCommand.Flags().BoolVar(&fzfCrit, "crit", false, "only query critical services")
-	fzfCommand.Flags().BoolVar(&fzfMy, "my", false, "only query aliases listed in config.yml")
-
-	preview := &cobra.Command{
-		Use:    "__preview ENCODED",
-		Hidden: true,
-		Args:   cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			decoded, err := base64.StdEncoding.DecodeString(args[0])
-			if err != nil {
-				return fmt.Errorf("decode preview: %w", err)
-			}
-			_, err = stdout.Write(decoded)
-			return err
-		},
-	}
-	open := &cobra.Command{
-		Use:    "__open URL",
-		Hidden: true,
-		Args:   cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			return openBrowser(args[0])
-		},
-	}
+	tuiCommand.Flags().BoolVar(&tuiCrit, "crit", false, "start with only critical services")
+	tuiCommand.Flags().BoolVar(&tuiMy, "my", false, "start with only aliases listed in config.yml")
 	refresh := &cobra.Command{
 		Use:    "__refresh",
 		Hidden: true,
@@ -222,7 +201,7 @@ func newRootCommand(stdin io.Reader, stdout, stderr io.Writer, secrets secretSto
 		},
 	}
 
-	root.AddCommand(overview, show, fzfCommand, newAuthCommand(stdin, stdout, stderr, secrets), preview, open, refresh)
+	root.AddCommand(overview, show, tuiCommand, newAuthCommand(stdin, stdout, stderr, secrets), refresh)
 	return root
 }
 
@@ -311,100 +290,6 @@ func executeShow(hostAlias string, stdout io.Writer, secrets secretStore) error 
 	return nil
 }
 
-func executeFZF(crit, my bool, stderr io.Writer, secrets secretStore) error {
-	fzfPath, err := exec.LookPath("fzf")
-	if err != nil {
-		return errors.New("fzf is not installed or not available in PATH")
-	}
-
-	c, cfg, hosts, err := loadHosts(secrets)
-	if err != nil {
-		return err
-	}
-	if my {
-		if len(cfg.Hosts) == 0 {
-			return errors.New("config hosts does not contain any hosts")
-		}
-	}
-
-	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Alias < hosts[j].Alias })
-
-	rows := make([]string, 0, len(hosts))
-	minimumState := 0
-	if crit {
-		minimumState = 2
-	}
-	for _, current := range hosts {
-		if my {
-			allowed := false
-			for _, alias := range cfg.Hosts {
-				if current.Alias == alias {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				continue
-			}
-		}
-		services := current.Services[:0]
-		for _, svc := range current.Services {
-			if svc.State >= minimumState {
-				services = append(services, svc)
-			}
-		}
-		current.Services = services
-		if len(current.Services) == 0 {
-			continue
-		}
-		sort.SliceStable(current.Services, func(i, j int) bool { return current.Services[i].State > current.Services[j].State })
-		previewLines := make([]string, 0, len(current.Services))
-		hostColor := ""
-		for _, svc := range current.Services {
-			previewLines = append(previewLines, colorize(formatService(svc), stateColor(svc.State)))
-			if svc.State == 2 {
-				hostColor = colorRed
-			} else if svc.State == 1 && hostColor != colorRed {
-				hostColor = colorYellow
-			}
-		}
-		encoded := base64.StdEncoding.EncodeToString([]byte(strings.Join(previewLines, "\n")))
-		rows = append(rows, strings.Join([]string{current.Name, colorize(current.Alias, hostColor), encoded, c.hostURL(current.Name)}, "\t"))
-	}
-
-	executable, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("find current executable: %w", err)
-	}
-	previewCommand := shellQuote(executable) + " __preview {3}"
-	openCommand := shellQuote(executable) + " __open {4}"
-	cmd := exec.Command(fzfPath,
-		"--ansi", "--delimiter=\t", "--with-nth=2",
-		"--preview", previewCommand,
-		"--preview-window=right,70%",
-		"--bind", "ctrl-o:execute-silent("+openCommand+")",
-		"--header", "Ctrl-O: open in browser | Enter: open and exit",
-	)
-	cmd.Stdin = strings.NewReader(strings.Join(rows, "\n"))
-	cmd.Stderr = stderr
-	var selected strings.Builder
-	cmd.Stdout = &selected
-	err = cmd.Run()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && (exitErr.ExitCode() == 1 || exitErr.ExitCode() == 130) {
-			return nil
-		}
-		return fmt.Errorf("fzf: %w", err)
-	}
-
-	fields := strings.Split(strings.TrimSuffix(selected.String(), "\n"), "\t")
-	if len(fields) < 4 {
-		return errors.New("fzf returned an invalid selection")
-	}
-	return openBrowser(fields[3])
-}
-
 func formatService(svc service) string {
 	description := truncateRunes(svc.Description, 60)
 	return fmt.Sprintf("%-30s %-10s %s", svc.Title, stateNames[svc.State], description)
@@ -426,6 +311,8 @@ func stateColor(state int) string {
 		return colorYellow
 	case 2:
 		return colorRed
+	case 3:
+		return colorMagenta
 	default:
 		return ""
 	}
@@ -445,10 +332,6 @@ func writerIsTerminal(writer io.Writer) bool {
 	}
 	info, err := file.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}
-
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func openBrowser(target string) error {

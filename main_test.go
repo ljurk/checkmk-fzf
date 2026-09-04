@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestClientHosts(t *testing.T) {
@@ -240,7 +242,7 @@ func TestCobraCommandTree(t *testing.T) {
 	if err := run([]string{"fzf", "--help"}, strings.NewReader(""), &stdout, &stderr, &memoryKeyring{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"Browse hosts and service details interactively", "--crit", "--my"} {
+	for _, expected := range []string{"Browse hosts and service details interactively", "tui", "--crit", "--my"} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Errorf("help output does not contain %q:\n%s", expected, stdout.String())
 		}
@@ -252,6 +254,130 @@ func TestCobraCommandTree(t *testing.T) {
 	stdout.Reset()
 	if err := run([]string{"show", "one", "two"}, strings.NewReader(""), &stdout, &stderr, &memoryKeyring{}); err == nil {
 		t.Fatal("show accepted too many arguments")
+	}
+}
+
+func TestTUIFiltersAndSearch(t *testing.T) {
+	model := tuiModel{
+		cfg: config{Hosts: []string{"Alpha"}},
+		allHosts: []host{
+			{Name: "a", Alias: "Alpha", Services: []service{{Title: "CPU", State: 2}, {Title: "Disk", State: 1}}},
+			{Name: "b", Alias: "Beta", Services: []service{{Title: "Ping", State: 0}}},
+		},
+	}
+	model.rebuildHosts()
+	if len(model.hosts) != 2 {
+		t.Fatalf("hosts = %#v", model.hosts)
+	}
+	model.critOnly = true
+	model.rebuildHosts()
+	if len(model.hosts) != 1 || model.hosts[0].Alias != "Alpha" || len(model.hosts[0].Services) != 1 {
+		t.Fatalf("critical hosts = %#v", model.hosts)
+	}
+	model.critOnly, model.myOnly = false, true
+	model.rebuildHosts()
+	if len(model.hosts) != 1 || model.hosts[0].Alias != "Alpha" {
+		t.Fatalf("my hosts = %#v", model.hosts)
+	}
+	model.myOnly, model.query = false, "bet"
+	model.rebuildHosts()
+	if len(model.hosts) != 1 || model.hosts[0].Alias != "Beta" {
+		t.Fatalf("searched hosts = %#v", model.hosts)
+	}
+}
+
+func TestTUIRefreshPreservesSelection(t *testing.T) {
+	model := tuiModel{
+		allHosts: []host{{Name: "a", Alias: "Alpha", Services: []service{{State: 0}}}, {Name: "b", Alias: "Beta", Services: []service{{State: 1}}}},
+		selected: 1, refreshing: true,
+	}
+	model.rebuildHosts()
+	updated, _ := model.Update(tuiRefreshMsg{
+		hosts:     []host{{Name: "b", Alias: "Beta renamed", Services: []service{{State: 2}}}, {Name: "c", Alias: "Charlie", Services: []service{{State: 0}}}},
+		fetchedAt: time.Now(),
+	})
+	got := updated.(tuiModel)
+	if got.refreshing || len(got.hosts) != 2 || got.hosts[got.selected].Name != "b" {
+		t.Fatalf("model after refresh = %#v", got)
+	}
+}
+
+func TestTUIViewContainsStatusAndControls(t *testing.T) {
+	model := tuiModel{
+		client: &client{}, width: 90, height: 20, fetchedAt: time.Now(),
+		allHosts: []host{{Name: "a", Alias: "Alpha", Services: []service{{Title: "CPU", Description: "hot", State: 2}}}},
+	}
+	model.rebuildHosts()
+	view := model.View()
+	for _, expected := range []string{"Checkmk services", "Alpha", "CPU", "updated", shortcutKey, "search", "refresh"} {
+		if !strings.Contains(view, expected) {
+			t.Errorf("view does not contain %q:\n%s", expected, view)
+		}
+	}
+}
+
+func TestRenderShortcutsFitsWholeBadges(t *testing.T) {
+	got := renderShortcuts(22, shortcut{"q", "quit"}, shortcut{"r", "refresh"}, shortcut{"x", "extra"})
+	if !strings.Contains(got, "q") || !strings.Contains(got, "r") || strings.Contains(got, "overview") {
+		t.Fatalf("shortcuts = %q", got)
+	}
+	if strings.Count(got, shortcutKey) != 2 || strings.Count(got, colorReset) != 4 {
+		t.Fatalf("shortcuts contain incomplete styles: %q", got)
+	}
+}
+
+func TestTUIOverviewGridColorsHostsByWorstState(t *testing.T) {
+	model := tuiModel{
+		width: 100, height: 24, overview: true, fetchedAt: time.Now(),
+		allHosts: []host{
+			{Name: "ok", Alias: "Healthy", Services: []service{{State: 0}}},
+			{Name: "warn", Alias: "Degraded", Services: []service{{State: 0}, {State: 1}}},
+			{Name: "crit", Alias: "Broken", Services: []service{{State: 1}, {State: 2}}},
+			{Name: "unknown", Alias: "Missing", Services: []service{{State: 2}, {State: 3}}},
+		},
+	}
+	model.rebuildHosts()
+	view := model.View()
+	for _, expected := range []string{"OVERVIEW", "Healthy", "Degraded", "Broken", "Missing", gridOK, gridWarning, gridCritical, gridUnknown} {
+		if !strings.Contains(view, expected) {
+			t.Errorf("overview does not contain %q:\n%s", expected, view)
+		}
+	}
+	if got := worstState(model.allHosts[3].Services); got != 3 {
+		t.Fatalf("worst state = %d, want 3", got)
+	}
+}
+
+func TestTUIOverviewCriticalFilterKeepsFullHostState(t *testing.T) {
+	model := tuiModel{
+		overview: true,
+		critOnly: true,
+		allHosts: []host{
+			{Name: "critical", Alias: "Critical", Services: []service{{State: 2}, {State: 1}}},
+			{Name: "warning", Alias: "Warning", Services: []service{{State: 1}}},
+		},
+	}
+	model.rebuildHosts()
+	if len(model.hosts) != 1 || model.hosts[0].Alias != "Critical" {
+		t.Fatalf("critical overview hosts = %#v", model.hosts)
+	}
+	critical, warning := stateCounts(model.hosts[0].Services)
+	if critical != 1 || warning != 1 {
+		t.Fatalf("service counts = %d critical, %d warning", critical, warning)
+	}
+}
+
+func TestTUITabSwitchesViews(t *testing.T) {
+	model := tuiModel{allHosts: []host{{Name: "a", Alias: "Alpha", Services: []service{{State: 0}}}}}
+	model.rebuildHosts()
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overview := updated.(tuiModel)
+	if !overview.overview {
+		t.Fatal("Tab did not switch to the overview")
+	}
+	updated, _ = overview.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if updated.(tuiModel).overview {
+		t.Fatal("second Tab did not switch back to services")
 	}
 }
 

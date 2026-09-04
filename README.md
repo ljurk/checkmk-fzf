@@ -1,8 +1,7 @@
 # checkmk-fzf
 
-A Go CLI built with [Cobra](https://github.com/spf13/cobra) for querying Checkmk
-service status and interactively browsing hosts with `fzf`. It is a Go
-reimplementation of the adjacent Python project.
+A Go CLI and [Bubble Tea](https://github.com/charmbracelet/bubbletea) terminal
+UI for querying Checkmk service status and interactively browsing hosts.
 
 ## Install
 
@@ -18,10 +17,6 @@ directory is included in your `PATH`, then confirm the installation:
 ```sh
 checkmk-fzf --help
 ```
-
-The interactive picker also requires
-[`fzf`](https://github.com/junegunn/fzf) to be installed and available in
-`PATH`.
 
 ## Build
 
@@ -77,18 +72,24 @@ With no alias, `show` displays all non-OK services:
 ./checkmk-fzf show
 ```
 
-Interactively browse hosts and preview their services:
+Launch the interactive terminal UI (also the default with no arguments):
 
 ```sh
-./checkmk-fzf fzf
+./checkmk-fzf
+./checkmk-fzf tui
 ```
 
-Press `Ctrl-O` to open the selected host in Checkmk without closing the picker.
-Press Enter to open it and exit. Filter to critical services with `--crit`, or
-to aliases from `config.yml` with `--my`:
+Use the arrow keys or `j`/`k` to select a host. Press `/` to search, `c` to
+toggle critical-only services, `m` to toggle aliases from `config.yml`, `r` to
+refresh, and Tab to switch to the color-coded host overview. In the overview,
+use all four arrow keys and press Enter to drill into a host. Press `o` to open
+it in Checkmk or `q` to quit.
+
+The initial filters can also be selected on the command line. `fzf` remains an
+alias for `tui` so existing scripts continue to work:
 
 ```sh
-./checkmk-fzf fzf --crit --my
+./checkmk-fzf tui --crit --my
 ./checkmk-fzf overview --my
 ```
 
@@ -97,8 +98,9 @@ to aliases from `config.yml` with `--my`:
 The first status command fetches all services from Checkmk and stores them in
 `services.json` under the operating system's user cache directory. Subsequent
 commands load that file immediately and apply their filters locally. Once the
-cache is 30 seconds old, the command still uses it immediately but starts a
-detached refresh for the next invocation.
+cache is 30 seconds old, the command still uses it immediately. The TUI
+refreshes it asynchronously and updates the visible host and service lists;
+noninteractive commands start a detached refresh for the next invocation.
 
 The cache is replaced atomically, and concurrent commands share a refresh lock
 to avoid sending duplicate requests. Removing `services.json` forces the next
