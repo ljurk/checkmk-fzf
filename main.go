@@ -29,15 +29,15 @@ const (
 var stateNames = map[int]string{0: "ok", 1: "warning", 2: "critical"}
 
 type service struct {
-	Title       string
-	Description string
-	State       int
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	State       int    `json:"state"`
 }
 
 type host struct {
-	Name     string
-	Alias    string
-	Services []service
+	Name     string    `json:"name"`
+	Alias    string    `json:"alias"`
+	Services []service `json:"services"`
 }
 
 type client struct {
@@ -213,13 +213,21 @@ func newRootCommand(stdin io.Reader, stdout, stderr io.Writer, secrets secretSto
 			return openBrowser(args[0])
 		},
 	}
+	refresh := &cobra.Command{
+		Use:    "__refresh",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return executeRefresh(secrets)
+		},
+	}
 
-	root.AddCommand(overview, show, fzfCommand, newAuthCommand(stdin, stdout, stderr, secrets), preview, open)
+	root.AddCommand(overview, show, fzfCommand, newAuthCommand(stdin, stdout, stderr, secrets), preview, open, refresh)
 	return root
 }
 
 func executeOverview(my bool, stdout io.Writer, secrets secretStore) error {
-	c, cfg, err := newConfiguredClient(secrets)
+	_, cfg, hosts, err := loadHosts(secrets)
 	if err != nil {
 		return err
 	}
@@ -235,10 +243,6 @@ func executeOverview(my bool, stdout io.Writer, secrets secretStore) error {
 		}
 	}
 
-	hosts, err := c.hosts(context.Background(), map[string]any{"op": "!=", "left": "state", "right": "0"})
-	if err != nil {
-		return err
-	}
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Alias < hosts[j].Alias })
 
 	color := writerIsTerminal(stdout)
@@ -269,15 +273,7 @@ func executeOverview(my bool, stdout io.Writer, secrets secretStore) error {
 }
 
 func executeShow(hostAlias string, stdout io.Writer, secrets secretStore) error {
-	query := map[string]any{"op": "!=", "left": "state", "right": "0"}
-	if hostAlias != "*" {
-		query = map[string]any{"op": "=", "left": "host_alias", "right": hostAlias}
-	}
-	c, _, err := newConfiguredClient(secrets)
-	if err != nil {
-		return err
-	}
-	hosts, err := c.hosts(context.Background(), query)
+	_, _, hosts, err := loadHosts(secrets)
 	if err != nil {
 		return err
 	}
@@ -288,6 +284,17 @@ func executeShow(hostAlias string, stdout io.Writer, secrets secretStore) error 
 	}
 	rows := make([]row, 0)
 	for _, current := range hosts {
+		if hostAlias == "*" {
+			services := current.Services[:0]
+			for _, svc := range current.Services {
+				if svc.State != 0 {
+					services = append(services, svc)
+				}
+			}
+			current.Services = services
+		} else if current.Alias != hostAlias {
+			continue
+		}
 		for _, svc := range current.Services {
 			rows = append(rows, row{host: current, svc: svc})
 		}
@@ -310,13 +317,7 @@ func executeFZF(crit, my bool, stderr io.Writer, secrets secretStore) error {
 		return errors.New("fzf is not installed or not available in PATH")
 	}
 
-	stateRight := "0"
-	if crit {
-		stateRight = "2"
-	}
-	stateQuery := map[string]any{"op": ">=", "left": "state", "right": stateRight}
-	var query any = stateQuery
-	c, cfg, err := newConfiguredClient(secrets)
+	c, cfg, hosts, err := loadHosts(secrets)
 	if err != nil {
 		return err
 	}
@@ -324,25 +325,38 @@ func executeFZF(crit, my bool, stderr io.Writer, secrets secretStore) error {
 		if len(cfg.Hosts) == 0 {
 			return errors.New("config hosts does not contain any hosts")
 		}
-		expressions := make([]any, 0, len(cfg.Hosts))
-		for _, alias := range cfg.Hosts {
-			expressions = append(expressions, map[string]any{"op": "=", "left": "host_alias", "right": alias})
-		}
-		var hostQuery any = expressions[0]
-		if len(expressions) > 1 {
-			hostQuery = map[string]any{"op": "or", "expr": expressions}
-		}
-		query = map[string]any{"op": "and", "expr": []any{stateQuery, hostQuery}}
 	}
 
-	hosts, err := c.hosts(context.Background(), query)
-	if err != nil {
-		return err
-	}
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Alias < hosts[j].Alias })
 
 	rows := make([]string, 0, len(hosts))
+	minimumState := 0
+	if crit {
+		minimumState = 2
+	}
 	for _, current := range hosts {
+		if my {
+			allowed := false
+			for _, alias := range cfg.Hosts {
+				if current.Alias == alias {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				continue
+			}
+		}
+		services := current.Services[:0]
+		for _, svc := range current.Services {
+			if svc.State >= minimumState {
+				services = append(services, svc)
+			}
+		}
+		current.Services = services
+		if len(current.Services) == 0 {
+			continue
+		}
 		sort.SliceStable(current.Services, func(i, j int) bool { return current.Services[i].State > current.Services[j].State })
 		previewLines := make([]string, 0, len(current.Services))
 		hostColor := ""

@@ -91,3 +91,15 @@ to aliases from `config.yml` with `--my`:
 ./checkmk-fzf fzf --crit --my
 ./checkmk-fzf overview --my
 ```
+
+## Cache
+
+The first status command fetches all services from Checkmk and stores them in
+`services.json` under the operating system's user cache directory. Subsequent
+commands load that file immediately and apply their filters locally. Once the
+cache is 30 seconds old, the command still uses it immediately but starts a
+detached refresh for the next invocation.
+
+The cache is replaced atomically, and concurrent commands share a refresh lock
+to avoid sending duplicate requests. Removing `services.json` forces the next
+command to wait for a fresh API response.

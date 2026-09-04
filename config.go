@@ -89,21 +89,20 @@ func compactStrings(values []string) []string {
 	return result
 }
 
-func newConfiguredClient(secrets secretStore) (*client, config, error) {
-	cfg, err := loadConfig()
-	if err != nil {
-		return nil, config{}, err
-	}
+func authenticatedClient(cfg config, secrets secretStore) (*client, error) {
 	secret, err := secrets.Get(keyringService, credentialAccount(cfg))
 	if err != nil {
 		if errors.Is(err, errSecretNotFound) {
-			return nil, config{}, errors.New("no Checkmk credential is stored; run checkmk-fzf auth login")
+			return nil, errors.New("no Checkmk credential is stored; run checkmk-fzf auth login")
 		}
-		return nil, config{}, fmt.Errorf("read credential from keyring: %w", err)
+		return nil, fmt.Errorf("read credential from keyring: %w", err)
 	}
+	return clientForConfig(cfg, secret), nil
+}
 
+func clientForConfig(cfg config, secret string) *client {
 	return &client{
 		baseURL: cfg.URL, site: cfg.Site, username: cfg.Username, secret: secret,
 		http: &http.Client{Timeout: 30 * time.Second},
-	}, cfg, nil
+	}
 }

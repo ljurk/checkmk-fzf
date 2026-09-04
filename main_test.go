@@ -148,8 +148,67 @@ func TestOverviewOutputAndQuery(t *testing.T) {
 	if stdout.String() != want {
 		t.Errorf("output:\n%s\nwant:\n%s", stdout.String(), want)
 	}
-	if gotQuery != `{"left":"state","op":"!=","right":"0"}` {
+	if gotQuery != `{"left":"state","op":"\u003e=","right":"0"}` {
 		t.Errorf("query = %s", gotQuery)
+	}
+}
+
+func TestLoadHostsUsesFreshCacheWithoutCredential(t *testing.T) {
+	setConfig(t, "https://checkmk.example")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []host{{Name: "host-1", Alias: "Alpha", Services: []service{{Title: "CPU", State: 2}}}}
+	if err := writeCache(cfg, want); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, got, err := loadHosts(&memoryKeyring{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("hosts = %#v, want %#v", got, want)
+	}
+}
+
+func TestLoadHostsStartsBackgroundRefreshForStaleCache(t *testing.T) {
+	setConfig(t, "https://checkmk.example")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := cachePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := cacheEntry{
+		Version: cacheVersion, Source: cacheSource(cfg),
+		FetchedAt: time.Now().Add(-cacheFreshFor - time.Second),
+		Hosts:     []host{{Alias: "cached"}},
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	started := false
+	original := startBackgroundRefresh
+	startBackgroundRefresh = func() { started = true }
+	t.Cleanup(func() { startBackgroundRefresh = original })
+	_, _, hosts, err := loadHosts(&memoryKeyring{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !started || len(hosts) != 1 || hosts[0].Alias != "cached" {
+		t.Fatalf("started = %v, hosts = %#v", started, hosts)
 	}
 }
 
@@ -265,6 +324,7 @@ func setConfig(t *testing.T, baseURL string) {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
 	directory := filepath.Join(root, programName())
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
